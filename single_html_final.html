@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Draughts Game by Dabeltech</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; padding:1rem; min-height:100vh; background:#f0eee6;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:#1a1a1a; }
+    h1,h2 { font-weight:600; }
+    button:hover { filter:brightness(0.97); }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback } = React;
+
+    // ─────────────────────────────────────────────────────────────
+    // PASTE YOUR FIREBASE CONFIG HERE
+    //   Firebase console → Project settings → Your apps → Config.
+    //   Make sure Realtime Database is enabled and databaseURL is correct.
+    // ─────────────────────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyDxxRxSZWohVD7xuLFzzxp7Czusyz2Eqz4",
+      authDomain: "draught-game-ebbc5.firebaseapp.com",
+      databaseURL: "https://draught-game-ebbc5-default-rtdb.firebaseio.com",
+      projectId: "draught-game-ebbc5",
+      storageBucket: "draught-game-ebbc5.firebasestorage.app",
+      messagingSenderId: "442171219102",
+      appId: "1:442171219102:web:33b2377c485d6df5372f8f",
+    };
+
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.database();
+
+    const SIZE = 8;
+    const EMPTY = null;
+
+    function initialBoard() {
+      const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+      for (let r = 0; r < SIZE; r++)
+        for (let c = 0; c < SIZE; c++)
+          if ((r + c) % 2 === 1) {
+            if (r < 3) board[r][c] = { color: "b", king: false };
+            else if (r > 4) board[r][c] = { color: "r", king: false };
+          }
+      return board;
+    }
+
+    function encode(board) {
+      return board.map(row => row.map(cell =>
+        cell ? (cell.king ? cell.color.toUpperCase() : cell.color) : ".").join("")).join("/");
+    }
+    function decode(str) {
+      return str.split("/").map(row => row.split("").map(ch => {
+        if (ch === ".") return EMPTY;
+        const color = ch.toLowerCase();
+        return { color, king: ch === ch.toUpperCase() };
+      }));
+    }
+
+    const inBounds = (r, c) => r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+    const ALL_DIRS = [[-1,-1],[-1,1],[1,-1],[1,1]];
+
+    function pieceMoves(board, r, c) {
+      const piece = board[r][c];
+      if (!piece) return { moves: [], jumps: [] };
+      const moves = [], jumps = [];
+      if (piece.king) {
+        for (const [dr, dc] of ALL_DIRS) {
+          let nr = r + dr, nc = c + dc;
+          while (inBounds(nr, nc) && !board[nr][nc]) { moves.push({ to: [nr, nc] }); nr += dr; nc += dc; }
+          if (inBounds(nr, nc) && board[nr][nc] && board[nr][nc].color !== piece.color) {
+            const cap = [nr, nc];
+            let lr = nr + dr, lc = nc + dc;
+            while (inBounds(lr, lc) && !board[lr][lc]) { jumps.push({ to: [lr, lc], captured: cap }); lr += dr; lc += dc; }
+          }
+        }
+      } else {
+        const moveDirs = piece.color === "r" ? [[-1,-1],[-1,1]] : [[1,-1],[1,1]];
+        for (const [dr, dc] of moveDirs) {
+          const nr = r + dr, nc = c + dc;
+          if (inBounds(nr, nc) && !board[nr][nc]) moves.push({ to: [nr, nc] });
+        }
+        for (const [dr, dc] of ALL_DIRS) {
+          const mr = r + dr, mc = c + dc, jr = r + 2*dr, jc = c + 2*dc;
+          if (inBounds(jr, jc) && !board[jr][jc] && board[mr]?.[mc] && board[mr][mc].color !== piece.color)
+            jumps.push({ to: [jr, jc], captured: [mr, mc] });
+        }
+      }
+      return { moves, jumps };
+    }
+
+    function legalMovesFor(board, color) {
+      let anyJump = false; const all = [];
+      for (let r = 0; r < SIZE; r++)
+        for (let c = 0; c < SIZE; c++) {
+          const p = board[r][c];
+          if (!p || p.color !== color) continue;
+          const { moves, jumps } = pieceMoves(board, r, c);
+          if (jumps.length) anyJump = true;
+          moves.forEach(m => all.push({ from: [r, c], ...m, jump: false }));
+          jumps.forEach(j => all.push({ from: [r, c], ...j, jump: true }));
+        }
+      return anyJump ? all.filter(m => m.jump) : all;
+    }
+
+    function applyMove(board, move) {
+      const next = board.map(row => row.map(cell => cell ? { ...cell } : EMPTY));
+      const [fr, fc] = move.from, [tr, tc] = move.to;
+      const piece = next[fr][fc];
+      next[fr][fc] = EMPTY;
+      if (move.captured) { const [cr, cc] = move.captured; next[cr][cc] = EMPTY; }
+      if (piece.color === "r" && tr === 0) piece.king = true;
+      if (piece.color === "b" && tr === SIZE - 1) piece.king = true;
+      next[tr][tc] = piece;
+      return next;
+    }
+
+    const hasMoreJumps = (board, r, c) => pieceMoves(board, r, c).jumps.length > 0;
+    const makeRoomCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+
+    function App() {
+      const [roomCode, setRoomCode] = useState("");
+      const [joined, setJoined] = useState(false);
+      const [myColor, setMyColor] = useState(null);
+      const [inputCode, setInputCode] = useState("");
+      const [game, setGame] = useState(null);
+      const [selected, setSelected] = useState(null);
+      const [chaining, setChaining] = useState(null);
+      const [status, setStatus] = useState("");
+
+      useEffect(() => {
+        if (!joined || !roomCode) return;
+        const gameRef = db.ref("games/" + roomCode);
+        const cb = gameRef.on("value", snap => {
+          const data = snap.val();
+          if (!data) return;
+          setGame({ board: decode(data.board), turn: data.turn, winner: data.winner || null });
+        });
+        return () => gameRef.off("value", cb);
+      }, [joined, roomCode]);
+
+      const createGame = useCallback(async () => {
+        const code = makeRoomCode();
+        const board = initialBoard();
+        await db.ref("games/" + code).set({
+          board: encode(board), turn: "r", winner: null, players: { r: true, b: false },
+        });
+        setRoomCode(code); setMyColor("r"); setJoined(true);
+        setStatus("Room created. Share code: " + code);
+      }, []);
+
+      const joinGame = useCallback(async () => {
+        const code = inputCode.trim().toUpperCase();
+        if (!code) return;
+        const snap = await db.ref("games/" + code).get();
+        if (!snap.exists()) { setStatus("No game found with that code."); return; }
+        let claimed = false;
+        await db.ref("games/" + code + "/players/b").transaction(current => {
+          if (current) return;
+          claimed = true; return true;
+        });
+        if (!claimed) { setStatus("Room is full."); return; }
+        setRoomCode(code); setMyColor("b"); setJoined(true); setStatus("Joined as Black.");
+      }, [inputCode]);
+
+      const handleCellClick = useCallback(async (r, c) => {
+        if (!game || game.winner) return;
+        if (game.turn !== myColor) { setStatus("Not your turn."); return; }
+        const board = game.board;
+        const legal = legalMovesFor(board, myColor);
+        const activeSelected = chaining || selected;
+
+        if (activeSelected) {
+          const [sr, sc] = activeSelected;
+          const move = legal.find(m => m.from[0] === sr && m.from[1] === sc && m.to[0] === r && m.to[1] === c);
+          if (move) {
+            const next = applyMove(board, move);
+            if (move.jump && hasMoreJumps(next, r, c)) {
+              setGame({ ...game, board: next });
+              setChaining([r, c]); setSelected([r, c]); setStatus("Keep capturing!");
+              await db.ref("games/" + roomCode).update({ board: encode(next) });
+              return;
+            }
+            const nextTurn = myColor === "r" ? "b" : "r";
+            const winner = legalMovesFor(next, nextTurn).length === 0 ? myColor : null;
+            await db.ref("games/" + roomCode).update({ board: encode(next), turn: nextTurn, winner });
+            setSelected(null); setChaining(null); setStatus("");
+            return;
+          }
+          if (chaining) { setStatus("You must continue the capture."); return; }
+        }
+
+        const piece = board[r][c];
+        if (piece && piece.color === myColor) {
+          const hasMove = legal.some(m => m.from[0] === r && m.from[1] === c);
+          if (hasMove) { setSelected([r, c]); setStatus(""); }
+          else setStatus("That piece has no legal move.");
+        }
+      }, [game, myColor, selected, chaining, roomCode]);
+
+      if (!joined) {
+        return (
+          <div style={styles.lobby}>
+            <h1>Draughts — Multiplayer</h1>
+            <button style={styles.btn} onClick={createGame}>Create new game</button>
+            <div style={{ margin: "16px 0" }}>or</div>
+            <input style={styles.input} placeholder="Enter room code" value={inputCode}
+              onChange={e => setInputCode(e.target.value)} />
+            <button style={styles.btn} onClick={joinGame}>Join game</button>
+            {status && <p>{status}</p>}
+            <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+          </div>
+        );
+      }
+
+      if (!game) {
+        return (
+          <div style={styles.lobby}>
+            Loading game {roomCode}…
+            <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+          </div>
+        );
+      }
+
+      const flip = myColor === "b";
+      const rowOrder = flip ? [...Array(SIZE).keys()].reverse() : [...Array(SIZE).keys()];
+      const colOrder = flip ? [...Array(SIZE).keys()].reverse() : [...Array(SIZE).keys()];
+      const legal = game.turn === myColor ? legalMovesFor(game.board, myColor) : [];
+      const activeSel = chaining || selected;
+      const targets = activeSel != null
+        ? legal.filter(m => m.from[0] === activeSel[0] && m.from[1] === activeSel[1]).map(m => m.to)
+        : [];
+
+      return (
+        <div style={styles.wrap}>
+          <h2>Room {roomCode}</h2>
+          <p>You are <strong>{myColor === "r" ? "Red" : "Black"}</strong>.{" "}
+            {game.winner ? `Winner: ${game.winner === "r" ? "Red" : "Black"}!`
+              : game.turn === myColor ? "Your turn." : "Opponent's turn."}</p>
+          {status && <p style={{ color: "#b00" }}>{status}</p>}
+          <div style={styles.board}>
+            {rowOrder.map(r => colOrder.map(c => {
+              const cell = game.board[r][c];
+              const dark = (r + c) % 2 === 1;
+              const isSelected = activeSel && activeSel[0] === r && activeSel[1] === c;
+              const isTarget = targets.some(t => t[0] === r && t[1] === c);
+              return (
+                <div key={r + "-" + c} onClick={() => handleCellClick(r, c)}
+                  style={{ ...styles.cell, background: dark ? "#769656" : "#eeeed2",
+                    outline: isSelected ? "3px solid #f6c945" : "none", cursor: dark ? "pointer" : "default" }}>
+                  {cell && (
+                    <div style={{ ...styles.piece,
+                      background: cell.color === "r" ? "#c0392b" : "#2c3e50",
+                      border: cell.king ? "2px solid #f6c945" : "2px solid rgba(0,0,0,0.3)",
+                      boxShadow: cell.king ? "0 0 8px rgba(246,201,69,0.7)" : "0 2px 4px rgba(0,0,0,0.4)" }}>
+                      {cell.king ? "♛" : ""}
+                    </div>
+                  )}
+                  {isTarget && <div style={styles.dot} />}
+                </div>
+              );
+            }))}
+          </div>
+          <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+        </div>
+      );
+    }
+
+    const styles = {
+      lobby: { fontFamily: "system-ui, sans-serif", maxWidth: 360, margin: "60px auto", textAlign: "center" },
+      wrap: { fontFamily: "system-ui, sans-serif", maxWidth: 480, margin: "24px auto", textAlign: "center" },
+      board: { display: "grid", gridTemplateColumns: "repeat(8, 1fr)", width: 480, maxWidth: "94vw",
+        aspectRatio: "1", margin: "0 auto", border: "2px solid #333" },
+      cell: { position: "relative", display: "flex", alignItems: "center", justifyContent: "center" },
+      piece: { width: "70%", height: "70%", borderRadius: "50%", display: "flex",
+        alignItems: "center", justifyContent: "center", color: "#f6c945", fontSize: 24 },
+      dot: { position: "absolute", width: 16, height: 16, borderRadius: "50%", background: "rgba(0,0,0,0.35)" },
+      btn: { display: "block", width: "100%", padding: "10px", margin: "8px 0", fontSize: 16, cursor: "pointer" },
+      input: { width: "100%", padding: "10px", fontSize: 16, boxSizing: "border-box", textTransform: "uppercase" },
+      brand: { marginTop: 20, fontSize: 12, color: "#888" },
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
