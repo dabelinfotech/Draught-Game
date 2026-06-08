@@ -1,0 +1,467 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Draughts Game by Dabeltech</title>
+  <style>
+    * { box-sizing: border-box; }
+    body { margin:0; padding:1rem; min-height:100vh; background:#f0eee6;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; color:#1a1a1a; }
+    h1,h2 { font-weight:600; }
+    button:hover { filter:brightness(0.97); }
+  </style>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+</head>
+<body>
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect, useCallback, useRef } = React;
+
+    // ─────────────────────────────────────────────────────────────
+    // PASTE YOUR FIREBASE CONFIG HERE (needed for Online mode only)
+    // ─────────────────────────────────────────────────────────────
+    const firebaseConfig = {
+      apiKey: "AIzaSyDxxRxSZWohVD7xuLFzzxp7Czusyz2Eqz4",
+      authDomain: "draught-game-ebbc5.firebaseapp.com",
+      databaseURL: "https://draught-game-ebbc5-default-rtdb.firebaseio.com",
+      projectId: "draught-game-ebbc5",
+      storageBucket: "draught-game-ebbc5.firebasestorage.app",
+      messagingSenderId: "442171219102",
+      appId: "1:442171219102:web:33b2377c485d6df5372f8f",
+    };
+
+    let db = null;
+    try { firebase.initializeApp(firebaseConfig); db = firebase.database(); }
+    catch (e) { console.warn("Firebase not configured — online mode disabled."); }
+
+    const SIZE = 8;
+    const EMPTY = null;
+
+    function initialBoard() {
+      const board = Array.from({ length: SIZE }, () => Array(SIZE).fill(EMPTY));
+      for (let r = 0; r < SIZE; r++)
+        for (let c = 0; c < SIZE; c++)
+          if ((r + c) % 2 === 1) {
+            if (r < 3) board[r][c] = { color: "b", king: false };
+            else if (r > 4) board[r][c] = { color: "r", king: false };
+          }
+      return board;
+    }
+
+    function encode(board) {
+      return board.map(row => row.map(cell =>
+        cell ? (cell.king ? cell.color.toUpperCase() : cell.color) : ".").join("")).join("/");
+    }
+    function decode(str) {
+      return str.split("/").map(row => row.split("").map(ch => {
+        if (ch === ".") return EMPTY;
+        const color = ch.toLowerCase();
+        return { color, king: ch === ch.toUpperCase() };
+      }));
+    }
+
+    const inBounds = (r, c) => r >= 0 && r < SIZE && c >= 0 && c < SIZE;
+    const ALL_DIRS = [[-1,-1],[-1,1],[1,-1],[1,1]];
+
+    function pieceMoves(board, r, c) {
+      const piece = board[r][c];
+      if (!piece) return { moves: [], jumps: [] };
+      const moves = [], jumps = [];
+      if (piece.king) {
+        for (const [dr, dc] of ALL_DIRS) {
+          let nr = r + dr, nc = c + dc;
+          while (inBounds(nr, nc) && !board[nr][nc]) { moves.push({ to: [nr, nc] }); nr += dr; nc += dc; }
+          if (inBounds(nr, nc) && board[nr][nc] && board[nr][nc].color !== piece.color) {
+            const cap = [nr, nc];
+            let lr = nr + dr, lc = nc + dc;
+            while (inBounds(lr, lc) && !board[lr][lc]) { jumps.push({ to: [lr, lc], captured: cap }); lr += dr; lc += dc; }
+          }
+        }
+      } else {
+        const moveDirs = piece.color === "r" ? [[-1,-1],[-1,1]] : [[1,-1],[1,1]];
+        for (const [dr, dc] of moveDirs) {
+          const nr = r + dr, nc = c + dc;
+          if (inBounds(nr, nc) && !board[nr][nc]) moves.push({ to: [nr, nc] });
+        }
+        for (const [dr, dc] of ALL_DIRS) {
+          const mr = r + dr, mc = c + dc, jr = r + 2*dr, jc = c + 2*dc;
+          if (inBounds(jr, jc) && !board[jr][jc] && board[mr]?.[mc] && board[mr][mc].color !== piece.color)
+            jumps.push({ to: [jr, jc], captured: [mr, mc] });
+        }
+      }
+      return { moves, jumps };
+    }
+
+    function legalMovesFor(board, color) {
+      let anyJump = false; const all = [];
+      for (let r = 0; r < SIZE; r++)
+        for (let c = 0; c < SIZE; c++) {
+          const p = board[r][c];
+          if (!p || p.color !== color) continue;
+          const { moves, jumps } = pieceMoves(board, r, c);
+          if (jumps.length) anyJump = true;
+          moves.forEach(m => all.push({ from: [r, c], ...m, jump: false }));
+          jumps.forEach(j => all.push({ from: [r, c], ...j, jump: true }));
+        }
+      return anyJump ? all.filter(m => m.jump) : all;
+    }
+
+    function applyMove(board, move) {
+      const next = board.map(row => row.map(cell => cell ? { ...cell } : EMPTY));
+      const [fr, fc] = move.from, [tr, tc] = move.to;
+      const piece = next[fr][fc];
+      next[fr][fc] = EMPTY;
+      if (move.captured) { const [cr, cc] = move.captured; next[cr][cc] = EMPTY; }
+      if (piece.color === "r" && tr === 0) piece.king = true;
+      if (piece.color === "b" && tr === SIZE - 1) piece.king = true;
+      next[tr][tc] = piece;
+      return next;
+    }
+
+    const hasMoreJumps = (board, r, c) => pieceMoves(board, r, c).jumps.length > 0;
+    const makeRoomCode = () => Math.random().toString(36).substring(2, 6).toUpperCase();
+
+    // ── AI: minimax with alpha-beta. Bot plays Black ("b"). ──
+    function evaluate(board) {
+      let s = 0;
+      for (let r = 0; r < SIZE; r++)
+        for (let c = 0; c < SIZE; c++) {
+          const p = board[r][c];
+          if (!p) continue;
+          const val = p.king ? 3 : 1;
+          s += p.color === "b" ? val : -val;
+        }
+      return s;
+    }
+    function minimax(board, depth, alpha, beta, maximizing) {
+      const color = maximizing ? "b" : "r";
+      const moves = legalMovesFor(board, color);
+      if (depth === 0 || moves.length === 0) return evaluate(board);
+      if (maximizing) {
+        let best = -Infinity;
+        for (const mv of moves) {
+          best = Math.max(best, minimax(applyMove(board, mv), depth - 1, alpha, beta, false));
+          alpha = Math.max(alpha, best);
+          if (beta <= alpha) break;
+        }
+        return best;
+      } else {
+        let best = Infinity;
+        for (const mv of moves) {
+          best = Math.min(best, minimax(applyMove(board, mv), depth - 1, alpha, beta, true));
+          beta = Math.min(beta, best);
+          if (beta <= alpha) break;
+        }
+        return best;
+      }
+    }
+    function bestBotMove(board, difficulty) {
+      const moves = legalMovesFor(board, "b");
+      if (!moves.length) return null;
+      if (difficulty === "easy" && Math.random() < 0.5)
+        return moves[Math.floor(Math.random() * moves.length)];
+      const depth = difficulty === "easy" ? 1 : difficulty === "medium" ? 3 : 5;
+      let best = -Infinity, bestMv = moves[0];
+      for (const mv of moves) {
+        const score = minimax(applyMove(board, mv), depth, -Infinity, Infinity, false);
+        if (score > best) { best = score; bestMv = mv; }
+      }
+      return bestMv;
+    }
+    // Bot plays a full turn including multi-jump chains.
+    function botPlayTurn(startBoard, difficulty) {
+      let board = startBoard;
+      let mv = bestBotMove(board, difficulty);
+      if (!mv) return board;
+      board = applyMove(board, mv);
+      let [r, c] = mv.to;
+      while (mv.jump && hasMoreJumps(board, r, c)) {
+        const chainJumps = pieceMoves(board, r, c).jumps;
+        // pick the chain jump that maximizes evaluation
+        let bestJ = chainJumps[0], bestScore = -Infinity;
+        for (const j of chainJumps) {
+          const sc = evaluate(applyMove(board, { from: [r, c], ...j, jump: true }));
+          if (sc > bestScore) { bestScore = sc; bestJ = j; }
+        }
+        mv = { from: [r, c], ...bestJ, jump: true };
+        board = applyMove(board, mv);
+        [r, c] = mv.to;
+      }
+      return board;
+    }
+
+    function App() {
+      const [mode, setMode] = useState(null); // null | "menu-bot" | "bot" | "menu-online"
+      const [difficulty, setDifficulty] = useState("medium");
+
+      // shared game state
+      const [board, setBoard] = useState(initialBoard());
+      const [turn, setTurn] = useState("r");
+      const [winner, setWinner] = useState(null);
+      const [selected, setSelected] = useState(null);
+      const [chaining, setChaining] = useState(null);
+      const [status, setStatus] = useState("");
+
+      // online state
+      const [roomCode, setRoomCode] = useState("");
+      const [joined, setJoined] = useState(false);
+      const [myColor, setMyColor] = useState("r");
+      const [inputCode, setInputCode] = useState("");
+
+      const botThinking = useRef(false);
+
+      // ── ONLINE: subscribe ──
+      useEffect(() => {
+        if (mode !== "online" || !joined || !roomCode || !db) return;
+        const gameRef = db.ref("games/" + roomCode);
+        const cb = gameRef.on("value", snap => {
+          const data = snap.val();
+          if (!data) return;
+          setBoard(decode(data.board));
+          setTurn(data.turn);
+          setWinner(data.winner || null);
+        });
+        return () => gameRef.off("value", cb);
+      }, [mode, joined, roomCode]);
+
+      // ── BOT: when it's black's turn, the bot moves ──
+      useEffect(() => {
+        if (mode !== "bot" || winner) return;
+        if (turn === "b" && !botThinking.current) {
+          botThinking.current = true;
+          setStatus("Computer is thinking…");
+          const t = setTimeout(() => {
+            const next = botPlayTurn(board, difficulty);
+            const redMoves = legalMovesFor(next, "r");
+            setBoard(next);
+            setTurn("r");
+            setStatus("");
+            if (redMoves.length === 0) setWinner("b");
+            botThinking.current = false;
+          }, 500);
+          return () => clearTimeout(t);
+        }
+      }, [mode, turn, winner, board, difficulty]);
+
+      function resetLocal(startColor = "r") {
+        setBoard(initialBoard()); setTurn("r"); setWinner(null);
+        setSelected(null); setChaining(null); setStatus("");
+      }
+
+      // ── BOT mode click handler (local) ──
+      const handleBotClick = useCallback((r, c) => {
+        if (winner || turn !== "r") return;
+        const legal = legalMovesFor(board, "r");
+        const activeSel = chaining || selected;
+        if (activeSel) {
+          const [sr, sc] = activeSel;
+          const move = legal.find(m => m.from[0]===sr && m.from[1]===sc && m.to[0]===r && m.to[1]===c);
+          if (move) {
+            const next = applyMove(board, move);
+            if (move.jump && hasMoreJumps(next, r, c)) {
+              setBoard(next); setChaining([r, c]); setSelected([r, c]); setStatus("Keep capturing!");
+              return;
+            }
+            const blackMoves = legalMovesFor(next, "b");
+            setBoard(next); setSelected(null); setChaining(null);
+            if (blackMoves.length === 0) { setWinner("r"); return; }
+            setTurn("b");
+            return;
+          }
+          if (chaining) { setStatus("You must continue the capture."); return; }
+        }
+        const piece = board[r][c];
+        if (piece && piece.color === "r") {
+          if (legal.some(m => m.from[0]===r && m.from[1]===c)) { setSelected([r, c]); setStatus(""); }
+          else setStatus("That piece has no legal move.");
+        }
+      }, [board, turn, winner, selected, chaining]);
+
+      // ── ONLINE handlers ──
+      const createGame = useCallback(async () => {
+        if (!db) { setStatus("Firebase not configured."); return; }
+        const code = makeRoomCode();
+        const b = initialBoard();
+        await db.ref("games/" + code).set({ board: encode(b), turn: "r", winner: null, players: { r: true, b: false } });
+        setRoomCode(code); setMyColor("r"); setJoined(true);
+        setStatus("Room created. Share code: " + code);
+      }, []);
+
+      const joinGame = useCallback(async () => {
+        if (!db) { setStatus("Firebase not configured."); return; }
+        const code = inputCode.trim().toUpperCase();
+        if (!code) return;
+        const snap = await db.ref("games/" + code).get();
+        if (!snap.exists()) { setStatus("No game found with that code."); return; }
+        let claimed = false;
+        await db.ref("games/" + code + "/players/b").transaction(cur => { if (cur) return; claimed = true; return true; });
+        if (!claimed) { setStatus("Room is full."); return; }
+        setRoomCode(code); setMyColor("b"); setJoined(true); setStatus("Joined as Black.");
+      }, [inputCode]);
+
+      const handleOnlineClick = useCallback(async (r, c) => {
+        if (winner || turn !== myColor) { if (turn !== myColor) setStatus("Not your turn."); return; }
+        const legal = legalMovesFor(board, myColor);
+        const activeSel = chaining || selected;
+        if (activeSel) {
+          const [sr, sc] = activeSel;
+          const move = legal.find(m => m.from[0]===sr && m.from[1]===sc && m.to[0]===r && m.to[1]===c);
+          if (move) {
+            const next = applyMove(board, move);
+            if (move.jump && hasMoreJumps(next, r, c)) {
+              setBoard(next); setChaining([r, c]); setSelected([r, c]); setStatus("Keep capturing!");
+              await db.ref("games/" + roomCode).update({ board: encode(next) });
+              return;
+            }
+            const nextTurn = myColor === "r" ? "b" : "r";
+            const win = legalMovesFor(next, nextTurn).length === 0 ? myColor : null;
+            await db.ref("games/" + roomCode).update({ board: encode(next), turn: nextTurn, winner: win });
+            setSelected(null); setChaining(null); setStatus("");
+            return;
+          }
+          if (chaining) { setStatus("You must continue the capture."); return; }
+        }
+        const piece = board[r][c];
+        if (piece && piece.color === myColor) {
+          if (legal.some(m => m.from[0]===r && m.from[1]===c)) { setSelected([r, c]); setStatus(""); }
+          else setStatus("That piece has no legal move.");
+        }
+      }, [board, turn, winner, myColor, selected, chaining, roomCode]);
+
+      // ── SCREENS ──
+      if (!mode) {
+        return (
+          <div style={styles.lobby}>
+            <h1>Draughts</h1>
+            <p style={{ color: "#666", fontSize: 14 }}>Choose how to play</p>
+            <button style={styles.btn} onClick={() => { resetLocal(); setMode("menu-bot"); }}>🤖 Play vs Computer</button>
+            <button style={styles.btn} onClick={() => setMode("online")}>🌍 Play Online</button>
+            <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+          </div>
+        );
+      }
+
+      if (mode === "menu-bot") {
+        return (
+          <div style={styles.lobby}>
+            <h2>Play vs Computer</h2>
+            <p style={{ color: "#666", fontSize: 14 }}>You are Red. Choose difficulty:</p>
+            <div style={{ display: "flex", gap: 8, margin: "16px 0" }}>
+              {["easy","medium","hard"].map(d => (
+                <button key={d} onClick={() => setDifficulty(d)}
+                  style={{ ...styles.diff, ...(difficulty===d ? styles.diffActive : {}) }}>
+                  {d[0].toUpperCase()+d.slice(1)}
+                </button>
+              ))}
+            </div>
+            <button style={styles.btn} onClick={() => { resetLocal(); setMode("bot"); }}>Start game</button>
+            <button style={styles.btnGhost} onClick={() => setMode(null)}>← Back</button>
+            <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+          </div>
+        );
+      }
+
+      if (mode === "online" && !joined) {
+        return (
+          <div style={styles.lobby}>
+            <h2>Play Online</h2>
+            <button style={styles.btn} onClick={createGame}>Create new game</button>
+            <div style={{ margin: "12px 0" }}>or</div>
+            <input style={styles.input} placeholder="Enter room code" value={inputCode}
+              onChange={e => setInputCode(e.target.value)} />
+            <button style={styles.btn} onClick={joinGame}>Join game</button>
+            {status && <p>{status}</p>}
+            <button style={styles.btnGhost} onClick={() => setMode(null)}>← Back</button>
+            <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+          </div>
+        );
+      }
+
+      // ── GAME BOARD (bot or online) ──
+      const isBot = mode === "bot";
+      const playerColor = isBot ? "r" : myColor;
+      const myTurn = !winner && turn === playerColor;
+      const flip = playerColor === "b";
+      const rowOrder = flip ? [...Array(SIZE).keys()].reverse() : [...Array(SIZE).keys()];
+      const colOrder = flip ? [...Array(SIZE).keys()].reverse() : [...Array(SIZE).keys()];
+      const legal = myTurn ? legalMovesFor(board, playerColor) : [];
+      const activeSel = chaining || selected;
+      const targets = activeSel != null
+        ? legal.filter(m => m.from[0]===activeSel[0] && m.from[1]===activeSel[1]).map(m => m.to) : [];
+      const onClick = isBot ? handleBotClick : handleOnlineClick;
+
+      const turnText = winner
+        ? `Winner: ${winner === "r" ? "Red" : "Black"}!`
+        : isBot
+          ? (turn === "r" ? "Your turn." : "Computer's turn.")
+          : (myTurn ? "Your turn." : "Opponent's turn.");
+
+      return (
+        <div style={styles.wrap}>
+          <h2>{isBot ? `Vs Computer (${difficulty})` : `Room ${roomCode}`}</h2>
+          <p>You are <strong>{playerColor === "r" ? "Red" : "Black"}</strong>. {turnText}</p>
+          {status && <p style={{ color: "#b00" }}>{status}</p>}
+          <div style={styles.board}>
+            {rowOrder.map(r => colOrder.map(c => {
+              const cell = board[r][c];
+              const dark = (r + c) % 2 === 1;
+              const isSelected = activeSel && activeSel[0]===r && activeSel[1]===c;
+              const isTarget = targets.some(t => t[0]===r && t[1]===c);
+              return (
+                <div key={r+"-"+c} onClick={() => onClick(r, c)}
+                  style={{ ...styles.cell, background: dark ? "#769656" : "#eeeed2",
+                    outline: isSelected ? "3px solid #f6c945" : "none", cursor: dark ? "pointer" : "default" }}>
+                  {cell && (
+                    <div style={{ ...styles.piece,
+                      background: cell.color === "r" ? "#c0392b" : "#2c3e50",
+                      border: cell.king ? "2px solid #f6c945" : "2px solid rgba(0,0,0,0.3)",
+                      boxShadow: cell.king ? "0 0 8px rgba(246,201,69,0.7)" : "0 2px 4px rgba(0,0,0,0.4)" }}>
+                      {cell.king ? "♛" : ""}
+                    </div>
+                  )}
+                  {isTarget && <div style={styles.dot} />}
+                </div>
+              );
+            }))}
+          </div>
+          <div style={{ marginTop: 12 }}>
+            {isBot && <button style={styles.btnSmall} onClick={() => resetLocal()}>Restart</button>}
+            <button style={styles.btnSmall} onClick={() => { setJoined(false); setMode(null); resetLocal(); }}>Menu</button>
+          </div>
+          <p style={styles.brand}>Powered by <strong>Dabeltech</strong></p>
+        </div>
+      );
+    }
+
+    const styles = {
+      lobby: { fontFamily: "system-ui, sans-serif", maxWidth: 360, margin: "60px auto", textAlign: "center" },
+      wrap: { fontFamily: "system-ui, sans-serif", maxWidth: 480, margin: "24px auto", textAlign: "center" },
+      board: { display: "grid", gridTemplateColumns: "repeat(8, 1fr)", width: 480, maxWidth: "94vw",
+        aspectRatio: "1", margin: "0 auto", border: "2px solid #333" },
+      cell: { position: "relative", display: "flex", alignItems: "center", justifyContent: "center" },
+      piece: { width: "70%", height: "70%", borderRadius: "50%", display: "flex",
+        alignItems: "center", justifyContent: "center", color: "#f6c945", fontSize: 24 },
+      dot: { position: "absolute", width: 16, height: 16, borderRadius: "50%", background: "rgba(0,0,0,0.35)" },
+      btn: { display: "block", width: "100%", padding: "12px", margin: "8px 0", fontSize: 16, cursor: "pointer",
+        border: "1px solid #ccc", borderRadius: 8, background: "#fff" },
+      btnGhost: { display: "block", width: "100%", padding: "8px", marginTop: 12, fontSize: 13, cursor: "pointer",
+        border: "none", background: "transparent", color: "#666" },
+      btnSmall: { padding: "6px 14px", margin: "0 4px", fontSize: 13, cursor: "pointer",
+        border: "1px solid #ccc", borderRadius: 6, background: "#fff" },
+      diff: { flex: 1, padding: "8px", fontSize: 13, cursor: "pointer", borderRadius: 6,
+        border: "1px solid #ccc", background: "#fff" },
+      diffActive: { border: "2px solid #333", fontWeight: 600 },
+      input: { width: "100%", padding: "10px", fontSize: 16, boxSizing: "border-box", textTransform: "uppercase" },
+      brand: { marginTop: 20, fontSize: 12, color: "#888" },
+    };
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
