@@ -1,0 +1,195 @@
+
+<style>
+  #draughts { padding: 1rem 0; font-family: var(--font-sans); user-select: none; }
+  #board { display: grid; grid-template-columns: repeat(8, 1fr); border: 1.5px solid var(--color-border-primary); border-radius: var(--border-radius-md); overflow: hidden; max-width: 440px; margin: 0 auto; aspect-ratio: 1; }
+  .cell { display: flex; align-items: center; justify-content: center; cursor: default; position: relative; }
+  .dark-cell { background: #3a3a5c; }
+  .light-cell { background: #d4c4a0; }
+  .dark-cell.selected { background: #5a8a5a; }
+  .dark-cell.valid-move { background: #4a7a6a; cursor: pointer; }
+  .dark-cell.valid-move::after { content: ''; width: 30%; height: 30%; border-radius: 50%; background: rgba(120,220,150,0.5); display: block; }
+  .piece { width: 75%; height: 75%; border-radius: 50%; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: clamp(12px, 2.5vw, 18px); font-weight: 500; transition: transform 0.1s; border: 2px solid rgba(0,0,0,0.2); }
+  .piece:hover { transform: scale(1.08); }
+  .piece.red { background: radial-gradient(circle at 35% 35%, #e85555, #a02020); color: #ffd0d0; }
+  .piece.black { background: radial-gradient(circle at 35% 35%, #555, #111); color: #ccc; }
+  .piece.king::after { content: '♛'; font-size: 60%; line-height: 1; }
+  #status { max-width: 440px; margin: 0.75rem auto 0; display: flex; justify-content: space-between; align-items: center; }
+  #turn-badge { font-size: 14px; padding: 4px 12px; border-radius: var(--border-radius-md); border: 0.5px solid var(--color-border-secondary); color: var(--color-text-primary); background: var(--color-background-secondary); }
+  #score { font-size: 13px; color: var(--color-text-secondary); }
+  #msg { max-width: 440px; margin: 0.5rem auto 0; font-size: 14px; color: var(--color-text-secondary); text-align: center; min-height: 20px; }
+  #reset-btn { display: block; margin: 0.75rem auto 0; }
+</style>
+<div id="draughts">
+  <div id="board"></div>
+  <div id="status">
+    <span id="turn-badge">Red's turn</span>
+    <span id="score">Red: 12 &nbsp; Black: 12</span>
+  </div>
+  <div id="msg">Click a piece to select it</div>
+  <button id="reset-btn" onclick="initGame()">New game</button>
+</div>
+<script>
+const EMPTY=0,RED=1,BLACK=2,RED_KING=3,BLACK_KING=4;
+let board=[],turn=RED,selected=null,validMoves=[],mustCapture=false,captures=[];
+
+function initGame(){
+  board=Array(8).fill(null).map(()=>Array(8).fill(EMPTY));
+  for(let r=0;r<3;r++) for(let c=0;c<8;c++) if((r+c)%2===1) board[r][c]=BLACK;
+  for(let r=5;r<8;r++) for(let c=0;c<8;c++) if((r+c)%2===1) board[r][c]=RED;
+  turn=RED; selected=null; validMoves=[]; mustCapture=false; captures=[];
+  render();
+}
+
+function isRed(p){return p===RED||p===RED_KING;}
+function isBlack(p){return p===BLACK||p===BLACK_KING;}
+function isKing(p){return p===RED_KING||p===BLACK_KING;}
+function owns(p,t){return t===RED?isRed(p):isBlack(p);}
+function enemy(p,t){return t===RED?isBlack(p):isRed(p);}
+
+function getCaptures(r,c,p){
+  const dirs=isKing(p)?[[-1,-1],[-1,1],[1,-1],[1,1]]:(isRed(p)?[[-1,-1],[-1,1]]:[[1,-1],[1,1]]);
+  const res=[];
+  for(const[dr,dc] of dirs){
+    const mr=r+dr,mc=c+dc,lr=r+2*dr,lc=c+2*dc;
+    if(lr>=0&&lr<8&&lc>=0&&lc<8&&enemy(board[mr][mc],turn)&&board[lr][lc]===EMPTY)
+      res.push({to:[lr,lc],cap:[mr,mc]});
+  }
+  return res;
+}
+
+function getMoves(r,c,p){
+  const dirs=isKing(p)?[[-1,-1],[-1,1],[1,-1],[1,1]]:(isRed(p)?[[-1,-1],[-1,1]]:[[1,-1],[1,1]]);
+  const res=[];
+  for(const[dr,dc] of dirs){
+    const nr=r+dr,nc=c+dc;
+    if(nr>=0&&nr<8&&nc>=0&&nc<8&&board[nr][nc]===EMPTY) res.push({to:[nr,nc],cap:null});
+  }
+  return res;
+}
+
+function allCaptures(){
+  const res=[];
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++)
+    if(owns(board[r][c],turn)) for(const m of getCaptures(r,c,board[r][c])) res.push({from:[r,c],...m});
+  return res;
+}
+
+function countPieces(){
+  let red=0,black=0;
+  for(let r=0;r<8;r++) for(let c=0;c<8;c++){ if(isRed(board[r][c]))red++; if(isBlack(board[r][c]))black++; }
+  return{red,black};
+}
+
+function selectPiece(r,c){
+  const p=board[r][c];
+  if(!owns(p,turn)) return;
+  selected=[r,c];
+  const caps=getCaptures(r,c,p);
+  if(mustCapture&&caps.length===0){setMsg('You must capture a piece!');selected=null;render();return;}
+  validMoves=mustCapture?caps:caps.length>0?caps:getMoves(r,c,p);
+  render();
+}
+
+function movePiece(tr,tc){
+  if(!selected) return;
+  const mv=validMoves.find(m=>m.to[0]===tr&&m.to[1]===tc);
+  if(!mv) return;
+  const[sr,sc]=selected;
+  const p=board[sr][sc];
+  board[tr][tc]=p;
+  board[sr][sc]=EMPTY;
+  if(mv.cap) board[mv.cap[0]][mv.cap[1]]=EMPTY;
+  if(tr===0&&isRed(board[tr][tc])) board[tr][tc]=RED_KING;
+  if(tr===7&&isBlack(board[tr][tc])) board[tr][tc]=BLACK_KING;
+  if(mv.cap){
+    const furtherCaps=getCaptures(tr,tc,board[tr][tc]);
+    if(furtherCaps.length>0){selected=[tr,tc];validMoves=furtherCaps;mustCapture=true;render();checkWin();return;}
+  }
+  turn=turn===RED?BLACK:RED;
+  selected=null;validMoves=[];
+  const ac=allCaptures();
+  mustCapture=ac.length>0;
+  checkAI();
+}
+
+function checkWin(){
+  const{red,black}=countPieces();
+  if(red===0){setMsg('Black wins!');turn=null;}
+  else if(black===0){setMsg('Red wins!');turn=null;}
+}
+
+function checkAI(){
+  checkWin();
+  if(turn===null) return;
+  const{red,black}=countPieces();
+  document.getElementById('score').textContent=`Red: ${red}   Black: ${black}`;
+  if(turn===BLACK){setMsg("Black's turn (AI thinking...)");setTimeout(aiMove,400);}
+  else setMsg("Click a piece to move");
+  render();
+}
+
+function aiMove(){
+  if(turn!==BLACK) return;
+  const ac=allCaptures();
+  mustCapture=ac.length>0;
+  const pool=mustCapture?ac:[];
+  if(!mustCapture){
+    for(let r=0;r<8;r++) for(let c=0;c<8;c++)
+      if(owns(board[r][c],BLACK)) for(const m of getMoves(r,c,board[r][c])) pool.push({from:[r,c],...m});
+  }
+  if(pool.length===0){setMsg('Red wins! Black has no moves.');turn=null;render();return;}
+  const mv=pool[Math.floor(Math.random()*pool.length)];
+  const[sr,sc]=mv.from;const[tr,tc]=mv.to;
+  const p=board[sr][sc];
+  board[tr][tc]=p;board[sr][sc]=EMPTY;
+  if(mv.cap) board[mv.cap[0]][mv.cap[1]]=EMPTY;
+  if(tr===7&&isBlack(board[tr][tc])) board[tr][tc]=BLACK_KING;
+  const furtherCaps=mv.cap?getCaptures(tr,tc,board[tr][tc]):[];
+  if(furtherCaps.length>0){
+    const mv2=furtherCaps[Math.floor(Math.random()*furtherCaps.length)];
+    board[mv2.to[0]][mv2.to[1]]=board[tr][tc];board[tr][tc]=EMPTY;
+    board[mv2.cap[0]][mv2.cap[1]]=EMPTY;
+  }
+  turn=RED;selected=null;validMoves=[];
+  const ac2=allCaptures();mustCapture=ac2.length>0;
+  checkWin();
+  const{red,black}=countPieces();
+  document.getElementById('score').textContent=`Red: ${red}   Black: ${black}`;
+  if(turn===RED) setMsg(mustCapture?"You must capture a piece!":"Click a piece to move");
+  render();
+}
+
+function setMsg(t){document.getElementById('msg').textContent=t;}
+
+function render(){
+  const b=document.getElementById('board');
+  b.innerHTML='';
+  const selMoves=validMoves.map(m=>m.to[0]*8+m.to[1]);
+  for(let r=0;r<8;r++){
+    for(let c=0;c<8;c++){
+      const cell=document.createElement('div');
+      const dark=(r+c)%2===1;
+      cell.className=`cell ${dark?'dark-cell':'light-cell'}`;
+      const idx=r*8+c;
+      if(selected&&selected[0]===r&&selected[1]===c) cell.classList.add('selected');
+      else if(dark&&selMoves.includes(idx)) cell.classList.add('valid-move');
+      const p=board[r][c];
+      if(p!==EMPTY){
+        const piece=document.createElement('div');
+        piece.className=`piece ${isRed(p)?'red':'black'}${isKing(p)?' king':''}`;
+        if(turn!==null&&!cell.classList.contains('valid-move')) piece.onclick=()=>selectPiece(r,c);
+        cell.appendChild(piece);
+      } else if(dark&&selMoves.includes(idx)){
+        cell.onclick=()=>movePiece(r,c);
+      }
+      b.appendChild(cell);
+    }
+  }
+  const tb=document.getElementById('turn-badge');
+  if(turn===RED) tb.textContent="Red's turn (you)";
+  else if(turn===BLACK) tb.textContent="Black's turn (AI)";
+  else tb.textContent="Game over";
+}
+
+initGame();
+</script>
